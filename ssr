@@ -1,3 +1,39 @@
+安装Epel源
+arduino
+Copy code
+sudo yum install epel-release
+安装pip
+Copy code
+sudo yum install python-pip
+安装shadowsocks
+Copy code
+sudo pip install shadowsocks
+配置shadowsocks
+在/etc目录下创建一个文件名为shadowsocks.json的配置文件，并编辑该文件：
+
+bash
+Copy code
+sudo vi /etc/shadowsocks.json
+在文件中添加以下内容：
+
+json
+Copy code
+{
+    "server":"0.0.0.0",
+    "server_port":8388,
+    "password":"yourpassword",
+    "method":"aes-256-cfb",
+    "timeout":300
+}
+说明：
+
+"server":"0.0.0.0" 表示监听所有IP地址；
+"server_port":8388 表示服务器端口号；
+"password":"yourpassword" 表示密码，请将yourpassword替换成自己设置的密码；
+"method":"aes-256-cfb" 表示加密方式；
+"timeout":300 表示超时时间（
+
+
 如果你的系统是基于systemd的，你可以使用systemd来启动Shadowsocks服务。以下是具体步骤：
 
 创建一个shadowsocks.service文件，内容如下：
