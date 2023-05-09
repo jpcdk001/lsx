@@ -1,0 +1,39 @@
+如果你的系统是基于systemd的，你可以使用systemd来启动Shadowsocks服务。以下是具体步骤：
+
+创建一个shadowsocks.service文件，内容如下：
+makefile
+Copy code
+[Unit]
+Description=Shadowsocks Server
+After=network.target
+
+[Service]
+User=root
+ExecStart=/usr/bin/ssserver -c /etc/shadowsocks.json
+ExecReload=/bin/kill -HUP $MAINPID
+ExecStop=/bin/kill -s QUIT $MAINPID
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
+其中，/etc/shadowsocks.json是你的Shadowsocks配置文件的路径。
+
+将shadowsocks.service文件复制到/etc/systemd/system/目录下：
+bash
+Copy code
+sudo cp shadowsocks.service /etc/systemd/system/
+重新加载systemd的配置文件：
+Copy code
+sudo systemctl daemon-reload
+启用服务并设置自动启动：
+bash
+Copy code
+sudo systemctl enable shadowsocks.service
+启动服务：
+sql
+Copy code
+sudo systemctl start shadowsocks.service
+现在，Shadowsocks服务应该已经可以在系统启动时自动运行了。
+
+希望以上信息可以帮助你实现自动启动Shadowsocks服务。
