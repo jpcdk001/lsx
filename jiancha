@@ -1,0 +1,898 @@
+# -*- coding: gbk -*-
+
+import base64
+import ctypes
+import os
+import re
+import socket
+import time
+import tkinter as tk
+from datetime import datetime
+from tkinter import filedialog, scrolledtext, ttk
+import pywinauto
+from pywinauto.win32functions import SendMessageA
+import win32gui
+import configparser
+encoding = None
+
+
+class DataAnalyzerApp(tk.Tk):
+    def __init__(self, *args, default_config_id=1, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.title("数据分析软件")
+        self.MAX_LOG_LINES = 100
+        today = datetime.now().strftime('%Y-%m-%d')
+        self.log_filename = f"{today}.txt"
+        self.config_id = 1
+
+        self.is_checking_file_modification = False
+        self.check_file_modification_id = None
+
+        self.server = None
+        self.port = 1234
+        self.is_listening = False
+        self.operation_code = "execute_operation"
+
+        self.config = configparser.ConfigParser()
+        self.config.read('settings.ini')
+
+        self.conditions = []
+        self.condition_counter = {i + 1: 0 for i in range(len(self.conditions))}
+        self.condition_vars = []
+        self.last_condition_met = datetime(2000, 1, 1)
+
+        self.last_modified_time = 0
+        self.first_run = True
+        self.window_handle = tk.StringVar()
+        self.rate_handle = tk.StringVar()
+        self.name = tk.StringVar()
+        settings = self.load_settings()
+        self.window_handle.set(settings['window_handle'])
+        self.rate_handle.set(settings['rate_handle'])
+        self.name.set(settings['name'])
+        self.r1 = 0
+        self.r2 = 0
+        self.r3 = 0
+        self.r4 = 0
+        self.r5 = 0
+
+        # 添加新变量
+        self.config = {
+            'multiplier': tk.StringVar(),
+        }
+        self.start = tk.BooleanVar(value=False)
+        self.stop = tk.BooleanVar(value=False)
+        self.follow = tk.BooleanVar(value=False)
+        self.reverse = tk.BooleanVar(value=False)
+        self.rate_vars = []
+
+        # 时间段启用判断
+        self.exclude_time_enabled_var = tk.BooleanVar(value=False)
+        self.exclude_time_enabled = False
+
+        # 添加新变量
+        self.create_widgets()
+        self.load_config(self.config_id)
+        self.gengxinjub()
+    def create_widgets(self):
+        # 界面代码整理
+        for i in range(5):
+            condition_frame = tk.Frame(self)
+            condition_frame.grid(row=i + 1, column=0, sticky="w", padx=0)
+
+            total_amount_var = tk.StringVar()
+            minutes_var = tk.StringVar()
+            win_or_lose_var = tk.StringVar()
+            times_var = tk.StringVar()
+            win_lose_amount_var = tk.StringVar()
+            check_var = tk.IntVar()
+            rate_var = tk.StringVar()
+            beizhu_var = tk.StringVar()
+
+            tk.Label(condition_frame, text=f"{i + 1}:").pack(side=tk.LEFT)
+
+            tk.Label(condition_frame, text="金額").pack(side=tk.LEFT)
+            tk.Entry(condition_frame, textvariable=total_amount_var, width=3).pack(side=tk.LEFT)
+
+            tk.Label(condition_frame, text="%").pack(side=tk.LEFT)
+            tk.Entry(condition_frame, textvariable=total_amount_var, width=3).pack(side=tk.LEFT)
+
+            tk.Label(condition_frame, text="時間").pack(side=tk.LEFT)
+            tk.Entry(condition_frame, textvariable=minutes_var, width=4).pack(side=tk.LEFT)
+
+            tk.Label(condition_frame, text="?").pack(side=tk.LEFT)
+            win_or_lose_menu = tk.OptionMenu(condition_frame, win_or_lose_var, "赢", "输")
+            win_or_lose_menu.pack(side=tk.LEFT)
+
+            tk.Label(condition_frame, text="次数").pack(side=tk.LEFT)
+            tk.Entry(condition_frame, textvariable=times_var, width=2).pack(side=tk.LEFT)
+
+            tk.Label(condition_frame, text="值").pack(side=tk.LEFT)
+            tk.Entry(condition_frame, textvariable=win_lose_amount_var, width=6).pack(side=tk.LEFT)
+
+            tk.Checkbutton(condition_frame, text="啓", variable=check_var).pack(side=tk.LEFT)
+
+            tk.Label(condition_frame, text="倍率").pack(side=tk.LEFT)
+            tk.Entry(condition_frame, textvariable=rate_var, width=4).pack(side=tk.LEFT)
+
+            tk.Label(condition_frame, text="函數").pack(side=tk.LEFT)
+            tk.Entry(condition_frame, textvariable=beizhu_var, width=5).pack(side=tk.LEFT)
+
+            self.condition_vars.append(
+                (check_var, total_amount_var, minutes_var, win_or_lose_var, times_var, win_lose_amount_var, rate_var,
+                 beizhu_var))
+
+        self.file_path_var = tk.StringVar()
+
+        file_frame = tk.Frame(self)
+        file_frame.grid(row=7, column=0, sticky="w", padx=0, pady=(0, 0))
+
+        tk.Label(file_frame, text="  路徑  ").pack(side=tk.LEFT)
+        tk.Entry(file_frame, textvariable=self.file_path_var, width=4).pack(side=tk.LEFT)
+        tk.Button(file_frame, text="選擇文件", command=self.select_file).pack(side=tk.LEFT)
+
+        # Create exclude time range widgets
+        tk.Label(file_frame, text="排除").pack(side=tk.LEFT)
+        self.exclude_start_var = tk.StringVar(value="02")
+        self.exclude_end_var = tk.StringVar(value="05")
+        tk.Entry(file_frame, textvariable=self.exclude_start_var, width=3).pack(side=tk.LEFT)
+        tk.Label(file_frame, text="-").pack(side=tk.LEFT)
+        tk.Entry(file_frame, textvariable=self.exclude_end_var, width=3).pack(side=tk.LEFT)
+
+        # Create exclude time checkbox
+        exclude_check = tk.Checkbutton(file_frame, text="启", variable=self.exclude_time_enabled_var, command=self.update_exclude_time).pack(side=tk.LEFT)
+
+        control_frame = tk.Frame(self)
+        control_frame.grid(row=7, column=1, sticky="w", padx=0)
+
+        tk.Button(file_frame, text="   獲取句柄   ", command=self.gengxinjub).pack(side=tk.LEFT)
+        tk.Button(file_frame, text="   打開目錄   ", command=self.open_directory).pack(side=tk.LEFT)
+        tk.Button(file_frame, text="   开始   ", command=self.start_analysis).pack(side=tk.LEFT)
+        tk.Button(file_frame, text="   停止   ", command=self.stop_analysis).pack(side=tk.LEFT)
+
+        self.info_text = tk.Text(self, wrap=tk.WORD, height=10, width=2)
+        self.info_text.grid(row=0, column=0, padx=5, pady=(0, 0), sticky='nsew')
+
+        # 创建一个 Scrollbar 控件，用于滚动日志信息
+        self.log_scrollbar = tk.Scrollbar(self, command=self.info_text.yview)
+        self.log_scrollbar.grid(row=0, column=1, pady=(0, 0), sticky='ns')
+
+        # 将 Scrollbar 控件关联到 Text 控件
+        self.info_text.configure(yscrollcommand=self.log_scrollbar.set)
+
+        # 让 Text 控件与父容器四个边都绑定
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+
+        # 将 Text 控件的高度和宽度设为 1
+        self.info_text.grid_propagate(False)
+
+        file_frame = tk.Frame(self)
+        file_frame.grid(row=6, column=0, sticky="w", padx=0, pady=(0, 0))
+        control_frame = tk.Frame(self)
+        control_frame.grid(row=6, column=0, sticky="w", padx=0)
+        # 创建选项卡 - 参数设置 - 句柄设置
+        tk.Label(file_frame, text="  句柄  ").pack(side=tk.LEFT)
+        tk.Entry(file_frame, textvariable=self.window_handle, width=8).pack(side=tk.LEFT)
+
+        tk.Label(file_frame, text="倍柄").pack(side=tk.LEFT)
+        tk.Entry(file_frame, textvariable=self.rate_handle, width=8).pack(side=tk.LEFT)
+
+        tk.Label(file_frame, text="名字").pack(side=tk.LEFT)
+        tk.Entry(file_frame, textvariable=self.name, width=6).pack(side=tk.LEFT)
+
+        tk.Label(file_frame, text="  倍率").pack(side=tk.LEFT)
+        tk.Entry(file_frame, textvariable=self.config['multiplier'], width=3).pack(side=tk.LEFT)
+        tk.Button(file_frame, text="执行", command=self.xgbl).pack(side=tk.LEFT)
+        # 创建选项卡 - 参数设置 - 执行命令
+
+        tk.Button(file_frame, text="开 ", command=self.ks).pack(side=tk.LEFT)
+        tk.Button(file_frame, text="停 ", command=self.tz).pack(side=tk.LEFT)
+        tk.Button(file_frame, text="跟 ", command=self.gen).pack(side=tk.LEFT)
+        tk.Button(file_frame, text="反", command=self.fan).pack(side=tk.LEFT)
+        test_command_button = tk.Button(file_frame, text="調試", command=self.test_command)
+        test_command_button.pack(side=tk.LEFT)
+
+        self.config_names = ["配置1", "配置2", "配置3"]
+
+        self.config_selection_var = tk.StringVar()
+        self.config_selection_var.set(self.config_names[0])  # 默認選擇配置1
+
+        self.config_selection_menu = tk.OptionMenu(self.config_selection_var, *self.config_names)
+        # config_selection_menu.pack()
+
+        save_selected_config_button = tk.Button(text="保存選定配置",
+                                             command=lambda: self.apply_config_selection(save=True, load=False))
+        # save_selected_config_button.pack()
+
+        load_selected_config_button = tk.Button(text="加載選定配置",
+                                             command=lambda: self.apply_config_selection(save=False, load=True))
+        # load_selected_config_button.pack()
+
+    def apply_config_selection(self, save=True, load=True):
+        self.config_id = self.config_names.index(self.config_selection_var.get()) + 1
+        if save:
+            self.save_config(self.config_id)
+            self.save_settings(self.config_id)
+        if load:
+            self.load_config(self.config_id)
+            self.load_settings(self.config_id)
+
+
+
+    def load_settings(self,):
+        config = configparser.ConfigParser()
+        config.read(f'config_{self.config_id}.ini')
+
+
+        if not config.has_section('Settings'):
+            config.add_section('Settings')
+            config.set('Settings', 'window_handle', '')
+            config.set('Settings', 'rate_handle', '')
+            config.set('Settings', 'name', '')
+
+            with open(f'config_{self.config_id}.ini', 'w') as configfile:
+                config.write(configfile)
+
+        settings = {
+            'window_handle': config.get('Settings', 'window_handle'),
+            'rate_handle': config.get('Settings', 'rate_handle'),
+            'name': config.get('Settings', 'name'),
+        }
+
+        # 确保'servers'部分存在
+        if not config.has_section('servers'):
+            config.add_section('servers')
+            for i in range(1, 4):
+                ip_key = f'server{i}_ip'
+                port_key = f'server{i}_port'
+                code_key = f'server{i}_code'
+
+                config.set('servers', ip_key, '')
+                config.set('servers', port_key, '')
+                config.set('servers', code_key, '')
+
+            with open(f'config_{self.config_id}.ini', 'w') as configfile:
+                config.write(configfile)
+
+        return settings
+
+    def save_settings(self):
+        self.window_handle.get()
+        config = configparser.ConfigParser()
+
+
+        config.read(f'config_{self.config_id}.ini')
+        if not config.has_section('servers'):
+            config.add_section('servers')
+        config.set('Settings', 'window_handle', self.window_handle.get())
+        config.set('Settings', 'rate_handle', self.rate_handle.get())
+        config.set('Settings', 'name', self.name.get())
+
+
+        with open(f'config_{self.config_id}.ini', 'w') as configfile:
+            config.write(configfile)
+
+        for i in range(1, 4):
+            ip_key = f'server{i}_ip'
+            port_key = f'server{i}_port'
+            code_key = f'server{i}_code'
+
+            config.set('servers', ip_key, self.config.get(f'{i}', {}).get('ip', ''))
+            config.set('servers', port_key, self.config.get(f'{i}', {}).get('port', ''))
+            encoded_code = base64.b64encode(self.config.get(f'{i}', {}).get('', '').encode()).decode()
+            config.set('servers', code_key, encoded_code)
+
+            # 将配置写入文件
+        with open(f'config_{self.config_id}.ini', 'w') as configfile:
+            config.write(configfile)
+
+    def save_config(self):
+
+        config = {
+            "file_path": self.file_path_var.get()
+        }
+        for i, (
+        check_var, total_amount_var, minutes_var, win_or_lose_var, times_var, win_lose_amount_var, rate_vars, beizhu_var) in enumerate(
+                self.condition_vars):
+            config[f"condition_{i}_enabled"] = check_var.get()
+            config[f"condition_{i}_total_amount"] = total_amount_var.get()
+            config[f"condition_{i}_minutes"] = minutes_var.get()
+            config[f"condition_{i}_win_or_lose"] = win_or_lose_var.get()
+            config[f"condition_{i}_times"] = times_var.get()
+            config[f"condition_{i}_win_lose_amount"] = win_lose_amount_var.get()
+            config[f"condition_{i}_rate"] = rate_vars.get()
+            config[f"condition_{i}_beizhu"] = beizhu_var.get()
+
+
+        with open(f"config_{self.config_id}.txt", "w") as f:
+            for key, value in config.items():
+                f.write(f"{key}={value}\n")
+
+
+        self.save_settings(self.settings, self.config_id)
+    def load_config(self):
+        if os.path.exists(f"config_{self.config_id}.txt"):
+            with open(f"config_{self.config_id}.txt", "r") as f:
+                config = {}
+                for line in f:
+                    key, value = line.strip().split("=")
+                    config[key] = value
+
+                self.file_path_var.set(config.get("file_path", ""))
+
+                for i, (check_var, total_amount_var, minutes_var, win_or_lose_var, times_var, win_lose_amount_var, rate_vars, beizhu_var) in enumerate(self.condition_vars):
+                    check_var.set(int(config.get(f"condition_{i}_enabled", "0")))
+                    total_amount_var.set(config.get(f"condition_{i}_total_amount", ""))
+                    minutes_var.set(config.get(f"condition_{i}_minutes", ""))
+                    win_or_lose_var.set(config.get(f"condition_{i}_win_or_lose", "赢"))
+                    times_var.set(config.get(f"condition_{i}_times", ""))
+                    win_lose_amount_var.set(config.get(f"condition_{i}_win_lose_amount", ""))
+                    rate_vars.set(config.get(f"condition_{i}_rate", ""))
+                    beizhu_var.set(config.get(f"condition_{i}_beizhu", ""))
+
+            self.rate1 = config.get("condition_0_rate", "")
+            self.rate2 = config.get("condition_1_rate", "")
+            self.rate3 = config.get("condition_2_rate", "")
+            self.rate4 = config.get("condition_3_rate", "")
+            self.rate5 = config.get("condition_4_rate", "")
+
+        self.load_settings(self.config_id)
+        self.save_settings(self.config_id)
+
+    def update_exclude_time(self):
+        self.exclude_time_enabled = self.exclude_time_enabled_var.get()
+
+    def chaxjb(self, hwnd, jbname):
+        self.mz_exe = self.load_name()
+        parent_hwnd = win32gui.FindWindow(None,self.mz_exe)
+
+        # 枚举所有子窗口
+        def callback(hwnd, jbname):
+            nonlocal child_hwnd  # 声明 child_hwnd 为 nonlocal，这样我们就可以在这个方法内修改它
+            if win32gui.GetWindowText(hwnd).find(jbname) >= 0:
+                child_hwnd = hwnd  # 修改 child_hwnd 的值
+        child_hwnd = None
+        win32gui.EnumChildWindows(parent_hwnd, callback, jbname)
+        return child_hwnd  # 返回 child_hwnd 值
+
+    def gengxinjub(self):
+        self.save_settings(self.config_id)
+        exename = self.load_name()
+        self.hwnd = self.chaxjb(exename, jbname="最小投注：")  # 调用 chaxjb 方法并获取 child_hwnd 值
+        self.hwnd2 = self.chaxjb(exename, jbname="0.05")  # 调用 chaxjb 方法并获取 child_hwnd 值
+        self.log_message(f"獲取句柄: {self.hwnd} {self.hwnd2}")
+        config = configparser.ConfigParser()
+        config.read(f'config.ini')
+        config.set('Settings', 'window_handle', str(self.hwnd))  # 将 hwnd 转换为字符串并存储到配置文件中
+        config.set('Settings', 'rate_handle', str(self.hwnd2))  # 将 hwnd 转换为字符串并存储到配置文件中
+
+
+        with open(f'config.ini', 'w') as configfile:
+            config.write(configfile)
+        self.window_handle.set(str(self.hwnd))
+        self.rate_handle.set(str(self.hwnd2))
+        self.load_settings(self.config_id)
+
+    def load_name(self):
+        config = configparser.ConfigParser()
+        config.read(f'config_{self.config_id}.ini')
+        self.name888 = config.get('Settings', 'name')
+        return self.name888
+
+    def create_server_widget(self, server_number, row_start):
+        lbl_server = tk.Label(self, text=f"{server_number}:")
+        lbl_server.grid(row=row_start, column=2, padx=0, pady=0, sticky="w")
+
+        entry_ip = tk.Entry(self, width=10)
+        entry_ip.insert(0, self.config.get(f'{server_number}', {}).get('ip', ''))
+        entry_ip.grid(row=row_start, column=3, padx=0, pady=0, sticky="w")
+
+        entry_port = tk.Entry(self, width=5)
+        entry_port.insert(0, self.config.get(f'{server_number}', {}).get('port', ''))
+        entry_port.grid(row=row_start, column=4, padx=0, pady=0, sticky="w")
+
+        lbl_code = tk.Label(self, text="")
+        lbl_code.grid(row=row_start + 1, column=2, padx=0, pady=0, sticky="w")
+
+        text_code = scrolledtext.ScrolledText(self, width=8, height=0, wrap=tk.WORD)
+        saved_code = self.config.get(f'{server_number}', {}).get('', '')
+        if saved_code:
+            decoded_code = base64.b64decode(saved_code.encode()).decode()
+            text_code.insert(tk.INSERT, decoded_code)
+        text_code.grid(row=row_start + 1, column=3, columnspan=2, padx=0, pady=0, sticky="w")
+
+        send_command_button = tk.Button(self, text="Send",
+                                        command=lambda: self.send_command(entry_ip, entry_port, text_code))
+        send_command_button.grid(row=row_start + 1, column=4, columnspan=3, padx=0, pady=0)
+
+        return entry_ip, entry_port, text_code
+
+    # def send_command(self, ip_entry, port_entry, code_entry):
+    #     try:
+    #         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+    #             s.settimeout(2)  # Set the timeout to 2 seconds
+    #             s.connect((ip_entry.get(), int(port_entry.get())))
+    #             operation_code = code_entry.get("1.0", tk.END).strip()
+    #             s.sendall(operation_code.encode())
+    #             self.update_status(f"Connected to server {ip_entry.get()}:{port_entry.get()} and sent command.")
+    #     except socket.timeout:
+    #         self.update_status("Connection timed out.")
+    #     except Exception as e:
+    #         self.update_status(f"Failed to connect to the server: {e}")
+    #
+    #
+    # def update_status(self, message):
+    #     self.status_text.config(state='normal')
+    #     self.status_text.insert(tk.END, message + '\n')
+    #     self.status_text.see(tk.END)
+    #     self.status_text.config(state='disabled')
+    #
+    # # 添加一个新的方法，用于更新状态信息
+    # def update_status_text(self, message):
+    #     self.status_text.config(state='normal')
+    #     self.status_text.insert(tk.END, message + "\n")
+    #     self.status_text.config(state='disabled')
+    #     self.status_text.see(tk.END)
+
+    def select_file(self):
+
+        file_path = filedialog.askopenfilename(filetypes=[("All files", "*.*")])
+        if file_path:
+            self.file_path_var.set(file_path)
+                # encoding = chardet.detect(raw_data)["encoding"]
+
+    def start_analysis(self):
+
+
+        self.conditions = []
+        for check_var, total_amount_var, minutes_var, win_or_lose_var, times_var, win_lose_amount_var, rate_vars,beizhu_var in self.condition_vars:
+            if check_var.get() == 1:
+                total_amount = float(total_amount_var.get())
+                minutes = int(minutes_var.get())
+                win_or_lose = win_or_lose_var.get()
+                times = int(times_var.get())
+                win_lose_amount = float(win_lose_amount_var.get())
+
+                self.conditions.append((total_amount, minutes, win_or_lose, times, win_lose_amount,))
+            # 重置 self.last_condition_met 变量
+        self.last_condition_met = datetime(2000, 1, 1)
+
+        self.first_run = True
+        self.analyze_data()
+        self.first_run = False
+        self.cancel_check_file_modification()  # 取消旧的文件修改时间检测
+        self.check_file_modification()
+        self.save_config(self.config_id)
+
+    def is_excluded_time(self, time):
+        exclude_start_hour = int(self.exclude_start_var.get())
+        exclude_end_hour = int(self.exclude_end_var.get())
+        return exclude_start_hour <= time.hour < exclude_end_hour
+
+    def check_file_modification(self):
+        if self.exclude_time_enabled:
+            print("開始判斷")
+            now = datetime.now().time()
+            if self.is_excluded_time(now):
+                self.check_file_modification_id = self.after(60000, self.check_file_modification)  # 等待1分钟后再次检查
+                return
+        file_path = self.file_path_var.get()
+        if os.path.isfile(file_path):
+            current_modified_time = os.path.getmtime(file_path)
+            if current_modified_time != self.last_modified_time:
+                self.last_modified_time = current_modified_time
+                self.live_analyze_data()
+        self.check_file_modification_id = self.after(5000, self.check_file_modification)
+        print("執行")
+        directory, filename = os.path.split(file_path)
+        today = datetime.now().strftime('%Y-%m-%d')
+        self.wjname = f"{today}_输赢.log"
+        if self.wjname == filename:
+            pass
+        else:
+            self.check_file_and_execute()
+
+    def check_file_and_execute(self):
+        today = datetime.now().strftime('%Y-%m-%d')
+        self.wjname = f"{today}_输赢.log"
+        file_path = self.file_path_var.get()
+        directory, filename = os.path.split(file_path)
+        self.ccc = filename
+        self.new_file_path = os.path.join(directory, self.wjname).replace("\\", "/")
+        current_directory = os.getcwd()  # 获取当前工作目录
+        file_path = os.path.join(current_directory, self.new_file_path)  # 拼接文件路径
+
+        if os.path.exists(file_path):
+            self.log_message("有新文件,更換分析文件...\n")
+            # 在这里放置你想执行的代码
+            self.file_path_var.set(self.new_file_path)
+            self.save_config(self.config_id)
+            self.log_message("更換完畢")
+        else:
+            pass
+
+    def cancel_check_file_modification(self):
+        if self.check_file_modification_id:
+            self.after_cancel(self.check_file_modification_id)
+            self.check_file_modification_id = None
+
+    def stop_analysis(self):
+        self.info_text.delete(1.0, tk.END)
+        self.cancel_check_file_modification()
+
+    def analyze_data(self, live=False):
+        if not live:
+            self.info_text.delete(1.0, tk.END)
+
+        with open(self.file_path_var.get(), "r") as f:
+            data_lines = f.readlines()
+
+            data_list = []
+            for line in data_lines:
+                line = re.sub(r'\s+', ' ', line)
+                match = re.match(
+                    r"\[(\d{4}/\d{1,2}/\d{1,2} \d{1,2}:\d{1,2}:\d{1,2})\].*总金额[:：](-?\d+(\.\d+)?).*输赢[:：](-?\d+)(\.\d+)?",
+                    line)
+                if match:
+                    timestamp = datetime.strptime(match.group(1), "%Y/%m/%d %H:%M:%S")
+                    current_total_amount = float(match.group(2))
+                    current_win_lose_amount = float(match.group(4))
+                    data_list.append((timestamp, current_total_amount, current_win_lose_amount))
+
+            if not live:
+                start_idx = 0
+            else:
+                start_idx = max(0, len(data_list) - 10)
+
+            commands = {
+                1: self.command_1,
+                2: self.command_2,
+                3: self.command_3,
+                4: self.command_4,
+                5: self.command_5
+            }
+
+            # Initialize counters for each condition
+            condition_counts = {i: 0 for i in range(1, 6)}
+            condition_totals = {i: 0 for i in range(1, 6)}
+
+            for i in range(start_idx, len(data_list)):
+                current_timestamp, current_total_amount, current_win_lose_amount = data_list[i]
+
+                met_conditions = []
+                for idx, condition in enumerate(self.conditions):
+                    total_amount, minutes, win_or_lose, times, win_lose_amount = condition
+
+                    if current_total_amount < total_amount:
+                        continue
+
+                    if (current_timestamp - self.last_condition_met).total_seconds() / 60 < minutes:
+                        continue
+
+                    cnt = 0
+                    max_amount = -float("inf")
+                    min_amount = float("inf")
+                    j = i
+                    while j >= 0 and (current_timestamp - data_list[j][0]).total_seconds() / 60 <= minutes:
+                        if win_or_lose == "赢" and data_list[j][2] > data_list[j - 1][2]:
+                            cnt += 1
+                            min_amount = min(min_amount, data_list[j - 1][2])
+                        elif win_or_lose == "输" and data_list[j][2] < data_list[j - 1][2]:
+                            cnt += 1
+                            max_amount = max(max_amount, data_list[j - 1][2])
+                        j -= 1
+
+                    real_win_lose = 0
+                    if win_or_lose == "赢":
+                        real_win_lose = current_win_lose_amount - min_amount
+                    elif win_or_lose == "输":
+                        real_win_lose = current_win_lose_amount - max_amount
+
+                    if cnt >= times and (
+                            win_or_lose == "赢" and real_win_lose >= win_lose_amount or win_or_lose == "输" and real_win_lose <= -win_lose_amount):
+                        met_conditions.append(idx + 1)
+                        self.last_condition_met = current_timestamp
+                        # Increment counters for the condition that was met
+                        condition_counts[idx + 1] += 1
+                        condition_totals[idx + 1] += real_win_lose
+                if met_conditions:
+                    met_conditions_str = ', '.join(map(str, met_conditions))
+                    self.log_message(
+                        f"{current_timestamp.strftime('%Y/%m/%d %H:%M:%S')}\t总额: {current_total_amount}\t输赢: {real_win_lose}\t符合: {met_conditions_str}\t{', '.join([f'条件{i}: 符合次数{condition_counts[i]}, 总盈亏{condition_totals[i]}' for i in met_conditions])}")
+                if live and not self.first_run:
+                    for condition_num in met_conditions:
+                        if condition_num in commands:
+                            self.save_config(self.config_id)
+                            self.r1 = self.rate1
+                            self.load_config(self.config_id)
+                            commands[condition_num]()  # 根据符合的条件调用相应的函数
+                elif live and self.first_run:
+                    self.first_run = False
+
+            #Display summary of condition results
+        if not live:
+            self.log_message('\n条件\t符合次数\t总盈亏')
+            for i in range(1, 6):
+                self.log_message(f"{i}\t{condition_counts[i]}\t{condition_totals[i]}")
+
+    #切字
+    def qiechu(self, abc):
+        ss = abc
+        start = ss.find('[')
+        end = ss.find(']')
+        if start != -1 and end != -1:
+            result = ss[start + 1:end]
+        return result
+    #
+
+    def test_command(self):
+        mzexe = self.name.get()
+        abc = self.qiechu(mzexe)
+        print(f"{abc}sbs")
+        self.save_settings(self.config_id)
+        self.load_config(self.config_id)
+        self.save_config(self.config_id)
+        function_names = self.condition_vars[0][7].get().split(',')
+        for function_name in function_names:
+            try:
+                eval(f'self.{function_name.strip()}()')
+            except Exception as e:
+                print(f"Error executing function '{function_name.strip()}': {e}")
+
+        self.log_message(f'符合條件執行({self.rate1})...')
+        return
+
+    def daima1(self):
+        ip_entry1, port_entry1, code_entry1 = self.create_server_widget(1, 0)
+    def daima2(self):
+        ip_entry2, port_entry2, code_entry2 = self.create_server_widget(2, 2)
+    def daima3(self):
+        ip_entry3, port_entry3, code_entry3 = self.create_server_widget(3, 4)
+
+    def command_1(self):
+        self.save_config(self.config_id)
+        self.load_config(self.config_id)
+
+        function_names = self.condition_vars[0][7].get().split(',')
+        for function_name in function_names:
+            try:
+                eval(f'self.{function_name.strip()}()')
+            except Exception as e:
+                print(f"錯誤命令 '{function_name.strip()}': {e}")
+        # function_name = self.condition_vars[0][7].get()
+        # eval(f'self.{function_name}()')
+        if str(self.rate1) > str(self.r1):
+            self.xgbl1()
+            self.log_message(f'符合條件執行(1)')
+        else:
+            self.log_message(f'已經在有倍數({self.rate1})在運行...')
+            self.save_config(self.config_id)
+        return
+
+    def command_2(self):
+        self.save_config(self.config_id)
+        self.load_config(self.config_id)
+        self.xgbl2()
+        function_names = self.condition_vars[1][7].get().split(',')
+        for function_name in function_names:
+            try:
+                eval(f'self.{function_name.strip()}()')
+            except Exception as e:
+                print(f"錯誤命令 '{function_name.strip()}': {e}")
+        # function_name = self.condition_vars[1][7].get()
+        # eval(f'self.{function_name}()')
+        time.sleep(1)
+        self.log_message("执行2命令")
+        return
+
+    def command_3(self):
+
+        self.save_config(self.config_id)
+        self.load_config(self.config_id)
+        # function_name = self.condition_vars[2][7].get()
+        # eval(f'self.{function_name}()')
+        self.xgbl3()
+        function_names = self.condition_vars[2][7].get().split(',')
+        for function_name in function_names:
+            try:
+                eval(f'self.{function_name.strip()}()')
+            except Exception as e:
+                print(f"錯誤命令 '{function_name.strip()}': {e}")
+        self.log_message(f'執行(3)')
+
+        # if str(self.rate3) > str(self.r3):
+        #     self.xgbl3()
+        #     self.log_message(f'符合條件執行(3)')
+        # else:
+        #     self.log_message(f'已經在有倍數({self.rate3})在運行...')
+        #     self.save_config(self.config_id)
+        return
+
+    def command_4(self):
+        self.save_config(self.config_id)
+        self.load_config(self.config_id)
+        self.xgbl4()
+        function_names = self.condition_vars[3][7].get().split(',')
+        for function_name in function_names:
+            try:
+                eval(f'self.{function_name.strip()}()')
+            except Exception as e:
+                print(f"錯誤命令 '{function_name.strip()}': {e}")
+        # function_name = self.condition_vars[3][7].get()
+        # eval(f'self.{function_name}()')
+        self.log_message("执行4命令")
+        return
+
+    def command_5(self):
+        self.save_config(self.config_id)
+        self.load_config(self.config_id)
+        function_names = self.condition_vars[4][7].get().split(',')
+        for function_name in function_names:
+            try:
+                eval(f'self.{function_name.strip()}()')
+            except Exception as e:
+                print(f"錯誤命令 '{function_name.strip()}': {e}")
+        # function_name = self.condition_vars[4][7].get()
+        # eval(f'self.{function_name}()')
+        self.xgbl5()
+        self.log_message(f'符合條件執行(5)')
+        # if str(self.rate5) > str(self.r5):
+        #     self.xgbl5()
+        #     self.log_message(f'符合條件執行(5)')
+        # else:
+        #     self.log_message(f'已經在有倍數({self.rate1})在運行...')
+        #     self.save_config(self.config_id)
+        return
+
+    def live_analyze_data(self):
+        self.analyze_data(live=True)
+
+    def ks(self):
+        # 开始
+        SendMessageA(int(self.window_handle.get()), 32885, 1, 0)
+
+    def tz(self):
+        # 停止
+        SendMessageA(int(self.window_handle.get()), 32885, 2, 0)
+
+    def gen(self):
+        # 跟
+        SendMessageA(int(self.window_handle.get()), 32885, 3, 1)
+
+    def fan(self):
+        # 反
+        SendMessageA(int(self.window_handle.get()), 32885, 3, 0)
+
+    def xgbl(self):
+        mzexe = self.name.get()
+        abccc = self.qiechu(mzexe)
+        # 修改倍率
+        app = pywinauto.Application().connect(path=abccc)
+        dlg1 = app.top_window()
+
+        SendMessageA(int(self.rate_handle.get()), 177, 0, -1)
+        textbl = self.config['multiplier'].get()
+        text_as_bytes = textbl.encode('utf-8')
+        text_buffer = ctypes.create_string_buffer(text_as_bytes)
+
+        # 使用ctypes.byref()获取text_buffer的引用
+        SendMessageA(int(self.rate_handle.get()), 194, 0, ctypes.byref(text_buffer))
+
+    def xgbl0(self):
+        mzexe = self.name.get()
+        abccc = self.qiechu(mzexe)
+        app = pywinauto.Application().connect(path=abccc)
+        dlg1 = app.top_window()
+        SendMessageA(int(self.rate_handle.get()), 177, 0, -1)
+        textbl = "0"
+        text_as_bytes = textbl.encode('utf-8')
+        text_buffer = ctypes.create_string_buffer(text_as_bytes)
+
+        # 使用ctypes.byref()获取text_buffer的引用
+        SendMessageA(int(self.rate_handle.get()), 194, 0, ctypes.byref(text_buffer))
+
+    def xgbl1(self):
+        mzexe = self.name.get()
+        abccc = self.qiechu(mzexe)
+        # 修改倍率
+        app = pywinauto.Application().connect(path=abccc)
+        dlg1 = app.top_window()
+
+        SendMessageA(int(self.rate_handle.get()), 177, 0, -1)
+        textbl = self.rate1
+        text_as_bytes = textbl.encode('utf-8')
+        text_buffer = ctypes.create_string_buffer(text_as_bytes)
+
+        # 使用ctypes.byref()获取text_buffer的引用
+        SendMessageA(int(self.rate_handle.get()), 194, 0, ctypes.byref(text_buffer))
+
+    def xgbl2(self):
+        mzexe = self.name.get()
+        abccc = self.qiechu(mzexe)
+        # 修改倍率
+        app = pywinauto.Application().connect(path=abccc)
+        dlg1 = app.top_window()
+
+        SendMessageA(int(self.rate_handle.get()), 177, 0, -1)
+        textbl = self.rate2
+        text_as_bytes = textbl.encode('utf-8')
+        text_buffer = ctypes.create_string_buffer(text_as_bytes)
+
+        # 使用ctypes.byref()获取text_buffer的引用
+        SendMessageA(int(self.rate_handle.get()), 194, 0, ctypes.byref(text_buffer))
+
+    def xgbl3(self):
+        mzexe = self.name.get()
+        abccc = self.qiechu(mzexe)
+        # 修改倍率
+        app = pywinauto.Application().connect(path=abccc)
+        dlg1 = app.top_window()
+
+        SendMessageA(int(self.rate_handle.get()), 177, 0, -1)
+        textbl = self.rate3
+        text_as_bytes = textbl.encode('utf-8')
+        text_buffer = ctypes.create_string_buffer(text_as_bytes)
+
+        # 使用ctypes.byref()获取text_buffer的引用
+        SendMessageA(int(self.rate_handle.get()), 194, 0, ctypes.byref(text_buffer))
+
+    def xgbl4(self):
+        mzexe = self.name.get()
+        abccc = self.qiechu(mzexe)
+        # 修改倍率
+        app = pywinauto.Application().connect(path=abccc)
+        dlg1 = app.top_window()
+
+        SendMessageA(int(self.rate_handle.get()), 177, 0, -1)
+        textbl = self.rate4
+        text_as_bytes = textbl.encode('utf-8')
+        text_buffer = ctypes.create_string_buffer(text_as_bytes)
+
+        # 使用ctypes.byref()获取text_buffer的引用
+        SendMessageA(int(self.rate_handle.get()), 194, 0, ctypes.byref(text_buffer))
+
+    def xgbl5(self):
+        mzexe = self.name.get()
+        abccc = self.qiechu(mzexe)
+        # 修改倍率
+        app = pywinauto.Application().connect(path=abccc)
+        dlg1 = app.top_window()
+
+        SendMessageA(int(self.rate_handle.get()), 177, 0, -1)
+        textbl = self.rate5
+        text_as_bytes = textbl.encode('utf-8')
+        text_buffer = ctypes.create_string_buffer(text_as_bytes)
+
+        # 使用ctypes.byref()获取text_buffer的引用
+        SendMessageA(int(self.rate_handle.get()), 194, 0, ctypes.byref(text_buffer))
+
+    def open_directory(self):
+        current_dir = os.getcwd()  # 獲取當前目錄
+        os.startfile(current_dir)
+
+    def log_message(self, msg):
+        """将一条日志信息写入 Text 控件中，并保存到日志文件"""
+        self.info_text.insert(tk.END, msg + '\n')  # 将 '\n' 放在同一个字符串中
+
+        self.save_log_to_file(msg)
+
+        # 如果 Text 控件中的行数超过最大行数，删除最旧的行
+        num_lines = int(self.info_text.index('end - 1 line').split('.')[0])
+        if num_lines > self.MAX_LOG_LINES:
+            # 删除最旧的行
+            self.info_text.delete('1.0', '2.0')
+
+        # 将滚动条滚动到最底部
+        self.info_text.yview_moveto(1.0)
+
+    def save_log_to_file(self, msg):
+        """将日志信息写入文件"""
+        with open(self.log_filename, 'a', encoding='utf-8') as log_file:
+            log_file.write(msg  )
+
+
+if __name__ == "__main__":
+    app = DataAnalyzerApp()
+    app.protocol("WM_DELETE_WINDOW")
+    app.mainloop()
