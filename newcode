@@ -1,0 +1,446 @@
+#-*- coding: gbk -*-
+
+import datetime
+import os
+import platform
+import sys
+import threading
+import tkinter as tk
+import configparser
+from tkinter import filedialog, messagebox, simpledialog, ttk
+
+import geoip2.database
+import items as items
+import socks
+import socket
+import psutil
+import subprocess
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
+import os
+# 创建一个配置文件对象
+config = configparser.ConfigParser()
+# 读取配置文件
+config.read('s5config.ini')
+driver_list = []
+_orig_socket = socket.socket
+
+class App:
+    def __init__(self, window):
+        self.window = window
+
+        self.window.title(os.path.splitext(os.path.basename(sys.argv[0]))[0])  # 使用修改的.exe文件名作为窗口标题
+        self.proxy_counter = 1  # 代理计数器，初始值为1
+        self.app_path = "chromedriver_win32/chromedriver.exe"
+        self.filename = "chromedriver.exe"
+        # 创建IP地址和端口号输入框和添加/删除按钮
+        # 读取配置文件中的最大代理编号
+        self.ip_label = tk.Label(window, text="  IP:")
+        self.ip_label.grid(row=0, padx=2, column=0)
+
+        self.ip_entry = tk.Entry(window)
+        self.ip_entry.grid(row=0, padx=2, column=1)
+        #
+        # self.port_label = tk.Label(window, text="Port:")
+        # self.port_label.grid(row=1, padx=2, column=0)
+        #
+        # self.port_entry = tk.Entry(window)
+        # self.port_entry.grid(row=1, padx=2, column=1)
+        # 创建备忘录输入框
+        self.remark_label = tk.Label(window, text="備注:")
+        self.remark_label.grid(row=1, padx=2, column=0)
+        self.remark_entry = tk.Entry(window)
+        self.remark_entry.grid(row=1, padx=2, column=1)
+
+        # 创建更新备忘录的按钮
+        self.update_remark_button = tk.Button(window, text="更新", command=self.update_remark)
+        self.update_remark_button.grid(row=1, column=2)
+
+        self.add_button = tk.Button(window, text="添加", command=self.add_proxy)
+        self.add_button.grid(row=0, column=2)
+
+        self.remove_button = tk.Button(window, text="删除", command=self.remove_proxy)
+        self.remove_button.grid(row=1, column=3)
+
+        self.proxy_listbox = tk.Listbox(window, selectmode=tk.EXTENDED, width=60)
+        self.proxy_listbox.grid(row=3, column=0, columnspan=2)
+
+        # 绑定双击事件
+        self.proxy_listbox.bind("<Double-Button-1>", self.copy_proxy)
+
+        # 设置代理列表的宽度自动拉伸
+        window.columnconfigure(0, weight=1)
+        window.columnconfigure(1, weight=1)
+
+        self.set_button = tk.Button(window, text="選擇", command=self.set_proxy)
+        self.set_button.grid(row=4, column=0)
+
+        self.start_button = tk.Button(window, text="运行", command=self.start_app)
+        self.start_button.grid(row=4, column=2)
+        self.start_button = tk.Button(window, text="檢測", command=self.check_socks5_status)
+        self.start_button.grid(row=3, column=2)
+
+        self.status_label = tk.Label(window, text="路径")
+        self.status_label.grid(row=4, column=1)
+
+        self.file_entry = tk.Entry(window)
+        self.file_entry.grid(row=4, column=1)
+        self.file_entry.insert(tk.END, self.app_path)
+        self.local_data = threading.local()  # 添加这行代码创建线程本地数据对象
+        # 保存
+        self.reader = geoip2.database.Reader('GeoLite2-City.mmdb')
+
+        # 假设代理状态为可用或不可用，使用 True 和 False 表示
+        proxy_status = [True, False, True, True, False]  # 代理状态列表示例
+        if 'Proxies' in config:
+            proxy_list = config['Proxies'].get('list', '').splitlines()
+            for proxy_info in proxy_list:
+                self.proxy_listbox.insert(tk.END, tuple(proxy_info.split(',')))
+        # 检查是否存在 'max_proxy_id' 键，如果不存在则添加到配置文件中
+        if 'max_proxy_id' not in config['Proxies1']:
+            config['Proxies1']['max_proxy_id'] = str(0)
+
+
+
+
+    def treeview_sort_column(self, col, reverse):
+        items = [(self.treeview.set(k, col), k) for k in self.treeview.get_children('')]
+        items.sort(reverse=reverse)
+        for index, (val, k) in enumerate(items):
+            self.treeview.move(k, '', index)
+        self.treeview.heading(col, command=lambda: self.treeview_sort_column(col, not reverse))
+
+
+    def sort_listbox(self):
+        # 获取listbox中的所有元素
+        items = self.proxy_listbox.get(0, 'end')
+
+        # 对元组进行排序，根据你的需求，这里假设我们根据代理ID（元组的第一个元素）排序
+        sorted_items = sorted(items, key=lambda x: int(x[0]))
+
+        # 清空listbox
+        self.proxy_listbox.delete(0, 'end')
+
+        # 将排序后的元素添加回listbox
+        for item in sorted_items:
+            self.proxy_listbox.insert('end', item)
+    def check_socks5_status(self):
+        # 获取选中的代理列表项的索引
+        selected_indices = self.proxy_listbox.curselection()
+        if not selected_indices:
+            return
+        # 设置超时时间为4秒
+        timeout = 4
+        # 遍历选中的代理列表项
+        for index in selected_indices:
+            proxy_info = self.proxy_listbox.get(index)
+            ip, port = proxy_info[1].split(':')
+
+            # 检测 SOCKS5 状态
+            socks.set_default_proxy(socks.SOCKS5, ip, int(port))
+            socket.socket = socks.socksocket
+            try:
+                # 创建一个测试连接
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(timeout)  # 设置超时时间
+                s.connect(("www.google.com", 80))
+                s.close()
+
+                # 更新代理列表项的元组，添加代理状态
+                proxy_info += ('正常',)
+
+                # 更新代理列表项
+                self.proxy_listbox.delete(index)
+                self.proxy_listbox.insert(index, proxy_info)
+
+                # 设置列表项背景颜色为绿色
+                self.proxy_listbox.itemconfig(index, bg="green")
+
+            except Exception as e:
+                # 更新代理列表项的元组，添加代理状态
+                proxy_info += ('失败',)
+
+                # 更新代理列表项
+                self.proxy_listbox.delete(index)
+                self.proxy_listbox.insert(index, proxy_info)
+
+                # 设置列表项背景颜色为红色
+                self.proxy_listbox.itemconfig(index, bg="red")
+
+            # 保存代理状态到配置文件
+            self.save_proxy_status(index, proxy_info[-1])
+
+            # 更新主应用程序的事件循环
+            self.window.update()
+
+        messagebox.showinfo("批量检测完成", "选中代理状态检测完成")
+
+    def save_proxy_status(self, index, status):
+        # 读取配置文件
+        config.read('s5config.ini')
+
+        # 获取代理服务器列表
+        proxies = list(config['Proxies'].get('list', '').splitlines())
+
+        # 获取原始代理信息
+        proxy_info = proxies[index].split(',')
+
+        # 在代理信息中添加状态
+        proxy_info.append(status)
+
+        # 更新代理列表中对应的项
+        proxies[index] = ','.join(proxy_info)
+
+        # 更新配置文件中的代理列表
+        config['Proxies'] = {'list': '\n'.join(proxies)}
+
+        # 将配置文件保存
+        with open('s5config.ini', 'w') as f:
+            config.write(f)
+
+    # 检查本地是否存在浏览器内核文件
+    def check_browser_core_file(self):
+        core_file_path = 'chromedriver_win32/chromedriver.exe'  # 浏览器内核文件的路径
+
+        if os.path.exists(core_file_path):
+            return True
+        else:
+            return False
+
+    def add_proxy(self):
+        ip = self.ip_entry.get()
+        port = self.port_entry.get()
+        ip = ip.strip()
+        port = port.strip()
+        ips = ip.split(':')[0]
+
+        # 读取配置文件中的最大代理编号，如果不存在，则设置初始值为0
+        max_proxy_ids = int(config.get('Proxies1', 'max_proxy_id', fallback=0))
+
+        # 递增代理编号
+        proxy_id = max_proxy_ids + 1
+        fingerprint = "位置"
+
+        # 创建代理字符串和时间戳
+        proxy = f"{ip}{port}"
+
+        timestamp = datetime.datetime.now().strftime("%m-%d")
+
+        # 获取IP地址对应的位置信息
+        country, city = self.get_ip_location(ips)
+
+        # 获取用户输入的备忘录
+        remark = self.remark_entry.get()
+        remark = remark.strip()
+
+        # 创建代理信息，添加备忘录字段
+        proxy_info = (str(proxy_id), proxy, timestamp, country, city, fingerprint, remark)
+        # 将代理、时间戳、国家和城市信息作为一个完整的项插入到代理列表框中
+        # proxy_info = (str(proxy_id), proxy, timestamp, country, city, )
+
+        self.proxy_listbox.insert(0, proxy_info)
+
+        # 清空输入框
+        self.ip_entry.delete(0, tk.END)
+        self.port_entry.delete(0, tk.END)
+
+        # 更新最大代理编号到配置文件
+        config['Proxies1']['max_proxy_id'] = str(proxy_id)
+        # # 保存代理服务器列表到配置文件
+        # proxies1 = [",".join(proxy) for proxy in self.proxy_listbox.get(0, tk.END)]
+        # config['Proxies1']['list'] = '\n'.join(proxies1)
+        proxies = [",".join(proxy) for proxy in self.proxy_listbox.get(0, tk.END)]
+        config['Proxies']['list'] = '\n'.join(proxies)
+        with open('s5config.ini', 'w') as f:
+            config.write(f)
+
+    def update_remark(self):
+        # 获取用户选中的代理
+        selection = self.proxy_listbox.curselection()
+        if selection:
+            index = selection[0]
+            proxy = list(self.proxy_listbox.get(index))
+
+            # 获取用户输入的新备忘录
+            new_remark = self.remark_entry.get()
+            new_remark = new_remark.strip()
+
+            # 更新代理信息的备忘录字段
+            proxy[-1] = new_remark
+            self.proxy_listbox.delete(index)
+            self.proxy_listbox.insert(index, tuple(proxy))
+
+        # 保存代理服务器列表到配置文件
+        proxies = [",".join(proxy) for proxy in self.proxy_listbox.get(0, tk.END)]
+        config['Proxies']['list'] = '\n'.join(proxies)
+        with open('s5config.ini', 'w') as f:
+            config.write(f)
+
+    def set_proxy(self):
+        app_path = filedialog.askopenfilename()
+        if not app_path:
+            return
+
+        # 显示选择的应用程序路径
+        self.file_entry.delete(0, tk.END)
+        self.app_path = app_path
+        app_path_label = os.path.basename(app_path)
+        self.file_entry.insert(tk.END, app_path_label)
+
+    def start_app(self):
+        app_path = self.file_entry.get()
+        self.filename = os.path.basename(app_path)
+
+        if not app_path or not self.filename:
+            return
+
+        indices = self.proxy_listbox.curselection()
+
+        if not indices:  # 如果没有选择代理服务器
+            self.start_chrome(self.app_path, self.filename, None, None, None)
+        else:  # 如果选择了代理服务器
+            # 获取选中的代理信息
+            selected_proxies = [self.proxy_listbox.get(index) for index in indices]
+
+            for proxy_info in selected_proxies:
+                proxy_id = proxy_info[0]
+                proxy = proxy_info[1]
+
+                # 创建浏览器目录
+                browser_directory = self.create_browser_directory(proxy_id)
+
+                # 启动浏览器并传递目录参数
+                self.start_chrome(self.app_path, self.filename, proxy_id, proxy, browser_directory)
+
+    def start_chrome(self, app_path, filename, proxy_id, proxy, browser_directory):
+        global driver
+        # 修改这行代码，用线程本地数据来保存 WebDriver 实例
+        driver = getattr(self.local_data, 'driver', None)
+
+        print(proxy_id)
+        if proxy is None:  # 如果没有选择代理服务器
+            result = messagebox.askquestion('Information', 'No proxy selected. Do you want to continue with local IP?')
+
+            if proxy is None:  # 如果没有选择代理服务器
+                # 设置 ChromeOptions，不使用代理
+                chrome_options = webdriver.ChromeOptions()
+                chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+
+                # 创建 ChromeDriver 服务对象
+                webdriver_path = ChromeDriverManager().install()
+                service = Service(executable_path=webdriver_path)
+                driver = None
+                try:
+                    driver = webdriver.Chrome(service=service, options=chrome_options)
+                    driver_list.append(driver)  # 将创建的 WebDriver 实例添加到全局列表中
+
+                    # 打开网页并设置标题
+                    driver.get('http://baidu.com')
+
+                except Exception as e:
+                    print(f"An error occurred: {str(e)}")
+        else:
+            # 提取IP地址和端口号
+            ip = proxy.split(':')[0]
+            port = proxy.split(':')[1]
+
+            print(ip)
+            print(port)
+
+            socks.set_default_proxy(socks.SOCKS5, ip, int(port))
+            # 创建一个新的用户配置文件目录
+            user_data_dir = os.path.join(browser_directory, f"user-data-dir-{proxy_id}")
+            proxy_str = f"{ip}:{port}"
+            chrome_options = webdriver.ChromeOptions()
+            # 添加下面的代码
+            chrome_options.add_experimental_option("useAutomationExtension", False)
+            chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+            chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+            chrome_options.add_argument(f'--user-data-dir={user_data_dir}')  # 新增此行
+            # 设置浏览器的下载目录为对应的目录路径
+            prefs = {
+                "download.default_directory": browser_directory,
+                "download.prompt_for_download": False,
+                "download.directory_upgrade": True
+            }
+            chrome_options.add_experimental_option("prefs", prefs)
+            chrome_options.add_argument(f'--proxy-server=socks5://{proxy_str}')
+
+            # 创建 ChromeDriver 服务对象
+            webdriver_path = ChromeDriverManager().install()
+            service = Service(executable_path=webdriver_path)
+            # 设置代理服务器
+
+            driver = None
+            try:
+                driver = webdriver.Chrome(service=service, options=chrome_options)
+                driver.execute_script(f"document.title = 'Proxy {proxy_id}'")  # 使用 JavaScript 设置标题
+                driver_list.append(driver)  # 将创建的 WebDriver 实例添加到全局列表中
+
+            except Exception as e:
+                print(f"An error occurred: {str(e)}")
+
+    def create_browser_directory(self, proxy_id):
+        base_directory = os.path.abspath(os.path.dirname(__file__))
+        browser_directory = os.path.join(base_directory, f"Browser-{proxy_id}")
+
+        # 检查目录是否已经存在
+        if not os.path.exists(browser_directory):
+            # 目录不存在，创建目录
+            os.makedirs(browser_directory)
+
+        return browser_directory
+
+
+    def close_drivers(self):
+        for driver in self.drivers:
+            driver.quit()
+
+    def remove_proxy(self):
+        selection = self.proxy_listbox.curselection()
+        if selection:
+            index = selection[0]
+            self.proxy_listbox.delete(index)
+
+        # 保存代理服务器列表到配置文件
+        proxies = [",".join(proxy) for proxy in self.proxy_listbox.get(0, tk.END)]
+        config['Proxies'] = {'list': '\n'.join(proxies)}
+        with open('s5config.ini', 'w') as f:
+            config.write(f)
+
+    def get_ip_location(self, ip):
+        try:
+            response = self.reader.city(ip)
+            country = response.country.name
+            city = response.city.name
+            return country, city
+        except geoip2.errors.AddressNotFoundError:
+            return None, None
+
+    def copy_proxy(self, event):
+        # 获取双击选中的代理信息
+        selection = self.proxy_listbox.curselection()
+        if selection:
+            index = selection[0]
+            proxy = self.proxy_listbox.get(index)
+
+            # 复制代理信息到剪贴板
+            self.window.clipboard_clear()
+            self.window.clipboard_append(proxy)
+            # 将剪贴板内容粘贴到self.ip_entry
+            self.paste_proxy()
+
+    def paste_proxy(self):
+        # 从剪贴板获取内容
+        proxy = self.window.clipboard_get()
+
+        # 将内容粘贴到self.ip_entry
+        self.ip_entry.delete(0, 'end')  # 清除self.ip_entry的内容
+        self.ip_entry.insert(0, proxy)  # 将剪贴板内容插入self.ip_entry
+
+
+if __name__ == '__main__':
+    root = tk.Tk()
+    app = App(root)
+    root.mainloop()
